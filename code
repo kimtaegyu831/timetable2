@@ -1,0 +1,884 @@
+code.ds
+const CONFIG = {
+  MAJOR_SHEET_ID: "1Wpx2WZshVEp4gK0zJBateYz_0rHq-9wV1Z9Xy3qyydc",
+  GEN_SHEET_ID:   "1u2jAdtv2rNwoLfE797hA57tgb6tPg5W0-2e6pjWQnkY",
+
+  MAJOR_TAB_NAME: "",
+  GEN_TAB_NAME:   "",
+
+  YEAR: 2026,
+  DAYS: ["월","화","수","목","금"],
+  PERIODS: 10,
+
+  // ✅ 학점 고정 컬럼(0-based)
+  // 전공 I열 = 9번째(1-based) => 8
+  // 교양 L열 = 12번째(1-based) => 11
+  MAJOR_CREDIT_COL_0: 8,
+  GEN_CREDIT_COL_0: 11,
+};
+
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile("index")
+    .setTitle("시간표 생성기")
+    .addMetaTag("viewport", "width=device-width, initial-scale=1");
+}
+
+function apiGetCourses() {
+  const majorSS = SpreadsheetApp.openById(CONFIG.MAJOR_SHEET_ID);
+  const genSS   = SpreadsheetApp.openById(CONFIG.GEN_SHEET_ID);
+
+  const majorCourses = readCoursesFromSpreadsheet_(majorSS, CONFIG.MAJOR_TAB_NAME, "전공", CONFIG.MAJOR_CREDIT_COL_0);
+  const genCourses   = readCoursesFromSpreadsheet_(genSS,   CONFIG.GEN_TAB_NAME,   "교양/교직", CONFIG.GEN_CREDIT_COL_0);
+
+  return {
+    courses: [...majorCourses, ...genCourses],
+    meta: { year: CONFIG.YEAR, days: CONFIG.DAYS, periods: CONFIG.PERIODS }
+  };
+}
+
+function readCoursesFromSpreadsheet_(ss, tabName, category, creditFallbackCol0) {
+  const sheet = tabName ? (ss.getSheetByName(tabName) || ss.getSheets()[0]) : ss.getSheets()[0];
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return [];
+
+  const headerRowIndex = findHeaderRow_(values);
+  const header = values[headerRowIndex].map(h => String(h).trim());
+  const rows = values.slice(headerRowIndex + 1);
+
+  const idx = makeHeaderIndex_(header);
+
+  const courses = [];
+  rows.forEach(r => {
+    if (!r || r.every(x => String(x).trim() === "")) return;
+    const c = normalizeRow_(r, idx, category, creditFallbackCol0);
+    if (c.subject) courses.push(c);
+  });
+
+  return courses;
+}
+
+function findHeaderRow_(values) {
+  for (let i = 0; i < Math.min(values.length, 10); i++) {
+    const line = values[i].join(" ");
+    if (line.includes("교과목명") || line.includes("과목명")) return i;
+  }
+  return 0;
+}
+
+function makeHeaderIndex_(header) {
+  const find = (...cands) => {
+    for (const c of cands) {
+      const i = header.indexOf(c);
+      if (i >= 0) return i;
+    }
+    for (let i = 0; i < header.length; i++) {
+      const h = header[i];
+      if (cands.some(c => h.includes(c))) return i;
+    }
+    return -1;
+  };
+  return {
+    subject: find("과목명","교과목명"),
+    time: find("시간","강의시간","강의시간/강의실","강의시간 / 강의실","강의실"),
+    professor: find("교수","교수명"),
+    credit: find("학점"),               // ✅ 헤더로 찾되,
+    code: find("코드","교과목코드"),
+    section: find("분반","수강반번호","수강반 번호"),
+    type: find("이수","이수구분"),
+  };
+}
+
+function normalizeRow_(row, idx, category, creditFallbackCol0) {
+  const pick = i => (i >= 0 && i < row.length ? String(row[i]).trim() : "");
+
+  const subject = pick(idx.subject);
+  const time = pick(idx.time);
+  const professor = pick(idx.professor);
+
+  // ✅ 학점: (1) 헤더 매핑 값 우선 → (2) 비어있으면 고정 컬럼(I/L)에서 보정
+  let credit = pick(idx.credit);
+  if (!credit) {
+    credit = pick(creditFallbackCol0);
+  }
+
+  const code = pick(idx.code);
+  const section = pick(idx.section);
+  const type = pick(idx.type);
+
+  return {
+    category,
+    subject,
+    time,
+    professor,
+    credit,
+    code,
+    section,
+    type,
+    searchText: row.join(" ").toLowerCase(),
+  };
+}
+
+index
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>시간표 생성기</title>
+  <style>
+    :root{
+      --bg:#f7f9fc; --card:#fff; --text:#0f172a; --muted:#64748b; --line:#e2e8f0;
+      --blue:#2563eb; --blue2:#1d4ed8; --danger:#be123c; --dangerbg:#fff1f2; --radius:16px;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans KR",Arial;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1080px;margin:0 auto;padding:20px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;box-shadow:0 10px 26px rgba(15,23,42,.06)}
+    .title{font-size:22px;font-weight:900;margin:0 0 8px}
+    .sub{margin:0;color:var(--muted);font-size:13px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .field{flex:1;min-width:180px}
+    label{display:block;font-size:12px;color:var(--muted);margin:10px 0 6px}
+    input, select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:12px;outline:none;background:white;font-size:14px}
+    input:focus, select:focus{border-color:#c7d2fe; box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+    .btn{border:0;background:var(--blue);color:white;padding:10px 12px;border-radius:12px;font-weight:900;cursor:pointer}
+    .btn:hover{background:var(--blue2)}
+    .btn.secondary{background:#0f172a0d;color:var(--text);border:1px solid var(--line)}
+    .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+    .page{display:none}
+    .page.active{display:block}
+
+    .topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+    .topmeta{font-size:12px;color:var(--muted);margin-bottom:6px}
+    .big{font-size:22px;font-weight:900;margin:0}
+    .small{font-size:12px;color:var(--muted)}
+
+    .notice{
+      margin:10px 0 0;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid #fecaca;
+      background:var(--dangerbg);
+      color:var(--danger);
+      font-size:12px;
+      display:none;
+      line-height:1.4;
+    }
+
+    .grid-wrap{margin-top:12px}
+    table{width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border-radius:14px;border:1px solid var(--line);background:white}
+    th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:8px;font-size:12px;vertical-align:top}
+    thead th{background:#f1f5ff;text-align:center;font-weight:900}
+    .corner{width:56px}
+    .period{background:#f8fafc;text-align:center;font-weight:900;color:var(--muted)}
+    .cell.empty{background:#fcfdff}
+    .cell .block{
+      display:block;border-radius:10px;padding:7px 8px;font-weight:900;line-height:1.15;
+      border:1px solid rgba(15,23,42,.06);box-shadow:0 6px 14px rgba(15,23,42,.06);
+      overflow:hidden;
+    }
+    .cell .b-title{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .cell .b-sub{margin-top:4px;font-weight:800;opacity:.9;font-size:11px;white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+
+    .panel{margin-top:14px;border:1px solid var(--line);border-radius:14px;background:white;overflow:hidden}
+    .panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;cursor:pointer;user-select:none;background:#fff}
+    .panel-body{display:none;border-top:1px solid var(--line);background:#fcfdff;padding:0}
+    .panel.open .panel-body{display:block}
+
+    .toolbar{
+      position:sticky; top:0; z-index:5;
+      background:#fcfdff; padding:14px; border-bottom:1px solid var(--line);
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    .toolbar input{flex:1;min-width:220px}
+    .selected{color:var(--muted);font-size:12px;padding:0 14px;margin-top:10px}
+    .panel-content{padding:12px 14px 14px}
+
+    .list{margin-top:10px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:white}
+    .list-scroll{
+      height: 420px;
+      overflow-y: scroll;
+      scrollbar-gutter: stable;
+      overscroll-behavior: contain;
+    }
+
+    .item{padding:10px 12px;border-top:1px solid var(--line);display:flex;gap:10px;align-items:flex-start;justify-content:space-between}
+    .item:first-child{border-top:0}
+    .item p{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.35}
+    .meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+    .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);background:#f8fafc;color:var(--text);font-weight:800}
+    .tag{display:inline-flex;align-items:center;border-radius:999px;padding:2px 10px;font-size:11px;font-weight:900;border:1px solid rgba(15,23,42,.08)}
+    .add{flex:0 0 auto;border:1px solid #c7d2fe;background:#eef2ff;color:#1d4ed8;font-weight:900;border-radius:12px;padding:9px 10px;cursor:pointer;white-space:nowrap}
+
+    /* page3 minimal keep */
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    @media (max-width: 980px){ .grid2{grid-template-columns:1fr;} }
+
+    .mini-list{margin-top:10px;border:1px solid var(--line);border-radius:12px;background:white;overflow:hidden}
+    .mini-head{padding:10px 12px;border-bottom:1px solid var(--line);font-weight:900;font-size:12px;color:var(--text);background:#f8fafc}
+    .mini-body{max-height:160px;overflow:auto}
+    .mini-item{padding:10px 12px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:flex-start;font-size:12px}
+    .mini-item:first-child{border-top:0}
+    .mini-item b{display:block;font-size:12px}
+    .mini-item span{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+    .xbtn{border:1px solid var(--line);background:#fff;border-radius:10px;padding:6px 8px;cursor:pointer;font-weight:900}
+
+    .cases{margin-top:12px;border:1px solid var(--line);border-radius:14px;background:#fff;overflow:hidden}
+    .cases-head{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}
+    .cases-list{padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap}
+    .case-btn{border:1px solid var(--line);background:#f8fafc;padding:8px 10px;border-radius:999px;cursor:pointer;font-weight:900;font-size:12px}
+    .case-btn.active{border-color:#c7d2fe;background:#eef2ff;color:#1d4ed8}
+  </style>
+</head>
+
+<body>
+<div class="wrap">
+
+  <div id="page1" class="page active">
+    <div class="card">
+      <p class="title">시간표 생성기</p>
+      <p class="sub">시작하기 전에 기본 정보를 입력해줘.</p>
+      <div class="row">
+        <div class="field"><label>이름</label><input id="name" placeholder="예: 김태규" /></div>
+        <div class="field">
+          <label>학년</label>
+          <select id="grade"><option>1학년</option><option>2학년</option><option>3학년</option><option selected>4학년</option></select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>학기</label>
+          <select id="semester"><option selected>1학기</option><option>2학기</option></select>
+        </div>
+        <div class="field"><label>전공</label><input id="major" placeholder="예: 산업시스템공학" /></div>
+      </div>
+      <div style="margin-top:14px"><button class="btn" id="btnStart" type="button">다음으로</button></div>
+      <p class="small" style="margin-top:10px">※ 강의 데이터는 스프레드시트(전공/교양)에서 로드됩니다.</p>
+      <p class="small" id="p1debug" style="margin-top:6px"></p>
+    </div>
+  </div>
+
+  <div id="page2" class="page">
+    <div class="card">
+      <div class="topbar">
+        <div>
+          <div class="topmeta" id="metaLine"></div>
+          <h1 class="big" id="mainTitle"></h1>
+          <p class="sub">아래에서 강의를 검색하고 추가해봐.</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn ghost" id="btnToCase" type="button">경우의 수 계산</button>
+        </div>
+      </div>
+
+      <div class="notice" id="conflictBox"></div>
+      <div class="grid-wrap" id="timetable"></div>
+
+      <div class="panel" id="panelMain">
+        <div class="panel-head" id="panelMainHead">
+          <b>강의 정보 펼치기</b>
+          <span class="small" id="panelMainHint">열기</span>
+        </div>
+        <div class="panel-body">
+          <div class="toolbar">
+            <input id="qMain" placeholder="전공 / 교양 / 과목명 / 교수명 / 코드 등 검색" />
+            <button class="btn secondary" id="btnClearMain" type="button">검색 초기화</button>
+          </div>
+          <div class="selected" id="selectedInfoMain"></div>
+          <div class="panel-content">
+            <div class="list"><div class="list-scroll" id="courseListMain"></div></div>
+            <p class="small" id="p2debug" style="margin-top:10px"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- page3 kept minimal (same behavior as before) -->
+  <div id="page3" class="page">
+    <div class="card">
+      <div class="topbar">
+        <div>
+          <div class="topmeta" id="metaLine3"></div>
+          <h1 class="big">경우의 수 계산</h1>
+          <p class="sub">필수과목은 항상 포함되고, 후보과목은 20학점 한도 내에서 겹치지 않게 조합을 만듭니다.</p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn secondary" id="btnBackToMain" type="button">메인으로</button>
+          <button class="btn" id="btnGenerateCases" type="button">경우의 수 생성</button>
+        </div>
+      </div>
+
+      <div class="notice" id="caseNotice"></div>
+
+      <div class="grid2" style="margin-top:12px">
+        <div class="panel open">
+          <div class="panel-head"><b>필수과목 등록</b><span class="small">필수: 항상 포함</span></div>
+          <div class="panel-body" style="display:block">
+            <div class="toolbar">
+              <input id="qReq" placeholder="검색 후 [필수 추가]" />
+              <button class="btn secondary" id="btnClearReq" type="button">초기화</button>
+            </div>
+            <div class="selected" id="selectedInfoReq"></div>
+            <div class="mini-list">
+              <div class="mini-head">현재 등록된 필수 과목</div>
+              <div class="mini-body" id="requiredList"></div>
+            </div>
+            <div class="panel-content">
+              <div class="list"><div class="list-scroll" id="courseListReq"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel open">
+          <div class="panel-head"><b>후보과목 등록</b><span class="small">후보: 조합 대상</span></div>
+          <div class="panel-body" style="display:block">
+            <div class="toolbar">
+              <input id="qCand" placeholder="검색 후 [후보 추가]" />
+              <button class="btn secondary" id="btnClearCand" type="button">초기화</button>
+            </div>
+            <div class="selected" id="selectedInfoCand"></div>
+            <div class="mini-list">
+              <div class="mini-head">현재 등록된 후보 과목</div>
+              <div class="mini-body" id="candidateList"></div>
+            </div>
+            <div class="panel-content">
+              <div class="list"><div class="list-scroll" id="courseListCand"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cases">
+        <div class="cases-head"><b>경우의 수 목록</b><span class="small" id="caseMeta">아직 생성되지 않음</span></div>
+        <div class="cases-list" id="caseList"></div>
+      </div>
+
+      <div class="grid-wrap" id="timetableCase" style="margin-top:12px"></div>
+      <p class="small" id="caseDebug" style="margin-top:10px"></p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const state = {
+    user: { name:"", grade:"", semester:"", major:"" },
+    meta: { year: 2026, days:["월","화","수","목","금"], periods: 10 },
+    courses: [],
+    mainFiltered: [],
+    mainSelected: [],
+    reqFiltered: [],
+    candFiltered: [],
+    required: [],
+    candidates: [],
+    cases: [],
+    activeCaseIndex: -1,
+  };
+
+  const PASTELS = ["#D8F3DC","#CDE4FF","#FFE5D9","#FFF3BF","#EBD4FF","#D0F4DE","#FFD6E0","#D9F99D","#E0FBFC","#FDE2E4","#E2E8F0","#DDE7FF"];
+  function courseKey(c){ return `${c.code||""}|${c.section||""}|${c.subject||""}|${c.time||""}`; }
+  function hashString(str){ let h=0; for(let i=0;i<str.length;i++){ h=(h<<5)-h+str.charCodeAt(i); h|=0; } return Math.abs(h); }
+  function colorForCourse(c){ return PASTELS[hashString(courseKey(c)) % PASTELS.length]; }
+
+  const DAY_MAP = { "월":"월","화":"화","수":"수","목":"목","금":"금","토":"토","일":"일" };
+  function parseSlots(timeStr){
+    if(!timeStr) return [];
+    let s = String(timeStr).replace(/\[.*?\]/g, "").trim().replace(/\s/g, "");
+    if(!s) return [];
+    const tokens = s.split(",").filter(Boolean);
+    let currentDay = null;
+    const slots = [];
+    for(const tok of tokens){
+      const m = tok.match(/^([월화수목금토일])(.+)$/);
+      let rest = tok;
+      if(m){ currentDay = DAY_MAP[m[1]]; rest = m[2]; }
+      if(!currentDay) continue;
+
+      const rm = rest.match(/^(\d+)[~-](\d+)$/);
+      if(rm){
+        const a = parseInt(rm[1],10), b=parseInt(rm[2],10);
+        for(let p=Math.min(a,b); p<=Math.max(a,b); p++) slots.push([currentDay,p]);
+        continue;
+      }
+      const nums = rest.match(/\d+/g);
+      if(nums) nums.forEach(n => slots.push([currentDay, parseInt(n,10)]));
+    }
+    const seen = new Set();
+    const out = [];
+    for(const [d,p] of slots){
+      const k = `${d}-${p}`;
+      if(!seen.has(k)){ seen.add(k); out.push([d,p]); }
+    }
+    return out;
+  }
+  function parseRoom(timeStr){
+    if(!timeStr) return "";
+    const m = String(timeStr).match(/\[([^\]]+)\]/);
+    return m ? m[1] : "";
+  }
+
+  // ✅✅ 핵심 수정: 학점은 '학점' 키워드가 있을 때만 파싱
+  function parseCreditToNumber(course){
+    const raw = (course && course.credit != null) ? String(course.credit).trim() : "";
+    if(raw){
+      // 숫자만 들어와도 OK, "3학점"도 OK
+      const m = raw.match(/(\d+(\.\d+)?)/);
+      if(m) return clampCredit(parseFloat(m[1]));
+    }
+
+    // fallback: type/category/searchText에서 "학점"이 붙은 경우만
+    const pool = [
+      course?.type,
+      course?.category,
+      course?.searchText
+    ].filter(Boolean).map(String);
+
+    for(const s of pool){
+      // "3학점"
+      let m = s.match(/(\d+(\.\d+)?)\s*학점/);
+      if(m) return clampCredit(parseFloat(m[1]));
+      // "학점 3" / "학점:3"
+      m = s.match(/학점\s*[:=]?\s*(\d+(\.\d+)?)/);
+      if(m) return clampCredit(parseFloat(m[1]));
+    }
+    return 0;
+  }
+
+  function clampCredit(v){
+    // 일반 대학 과목 학점 범위 안전장치(교시 10 같은 값 걸러냄)
+    if(!isFinite(v)) return 0;
+    if(v < 0) return 0;
+    if(v > 6) return 0;   // ✅ 10교시 같은 숫자 차단
+    return v;
+  }
+
+  function buildOccupancyMap(courses){
+    const occ = new Map();
+    for(const c of courses){
+      for(const [d,p] of parseSlots(c.time)) occ.set(`${d}-${p}`, c);
+    }
+    return occ;
+  }
+  function getConflicts(existingCourses, newCourse){
+    const occ = buildOccupancyMap(existingCourses);
+    const conflicts = [];
+    for(const [d,p] of parseSlots(newCourse.time)){
+      const k = `${d}-${p}`;
+      if(occ.has(k)) conflicts.push({ day:d, period:p, existing:occ.get(k), incoming:newCourse });
+    }
+    const uniq = new Map();
+    conflicts.forEach(x => uniq.set(`${x.day}-${x.period}-${courseKey(x.existing)}`, x));
+    return Array.from(uniq.values());
+  }
+
+  function showNotice(elId, html){
+    const box = document.getElementById(elId);
+    if(!html){ box.style.display="none"; box.innerHTML=""; return; }
+    box.innerHTML = html;
+    box.style.display="block";
+  }
+  function conflictHtml(conflicts){
+    if(!conflicts.length) return "";
+    const incName = conflicts[0].incoming.subject || "선택 과목";
+    const lines = conflicts.slice(0,12).map(c =>
+      `- ${c.day} ${c.period}교시: '${esc(c.existing.subject)}' ↔ '${esc(incName)}'`
+    ).join("<br>");
+    return `<b>⚠️ 시간표 겹침으로 추가할 수 없습니다</b><br>${lines}`;
+  }
+
+  function goto(pageId){
+    ["page1","page2","page3"].forEach(id => document.getElementById(id).classList.remove("active"));
+    document.getElementById(pageId).classList.add("active");
+  }
+
+  function renderTimetable(targetId, courses){
+    const days = state.meta.days, periods = state.meta.periods;
+    const grid = {};
+    days.forEach(d=>{ grid[d]={}; for(let p=1;p<=periods;p++) grid[d][p]=null; });
+
+    for(const c of courses){
+      for(const [d,p] of parseSlots(c.time)){
+        if(!grid[d] || p<1 || p>periods) continue;
+        grid[d][p] = c;
+      }
+    }
+
+    let thead = `<thead><tr><th class="corner">교시</th>${days.map(d=>`<th>${d}</th>`).join("")}</tr></thead>`;
+    let tbody = "<tbody>";
+    for(let p=1;p<=periods;p++){
+      tbody += `<tr><th class="period">${p}</th>`;
+      for(const d of days){
+        const c = grid[d][p];
+        if(!c) tbody += `<td class="cell empty"></td>`;
+        else{
+          const bg = colorForCourse(c);
+          const room = parseRoom(c.time);
+          const type = c.type || c.category || "";
+          const credit = parseCreditToNumber(c);
+          const line1 = `${esc(c.professor||"")}${room ? " · "+esc(room) : ""}`;
+          const line2 = `${esc(type)}${(type && credit) ? " · " : ""}${credit ? esc(credit+"학점") : ""}`;
+          tbody += `
+            <td class="cell">
+              <span class="block" style="background:${bg}">
+                <div class="b-title">${esc(c.subject)}</div>
+                <div class="b-sub">${line1}</div>
+                <div class="b-sub">${line2}</div>
+              </span>
+            </td>`;
+        }
+      }
+      tbody += "</tr>";
+    }
+    tbody += "</tbody>";
+    document.getElementById(targetId).innerHTML = `<table>${thead}${tbody}</table>`;
+  }
+
+  function updateMainSummary(){
+    const total = state.mainSelected.length;
+    const totalCredits = state.mainSelected.reduce((s,c)=> s + parseCreditToNumber(c), 0);
+    const majorCount = state.mainSelected.filter(c => String(c.category||"").includes("전공")).length;
+    const genCount   = state.mainSelected.filter(c => String(c.category||"").includes("교양")).length;
+    document.getElementById("selectedInfoMain").textContent =
+      `선택된 과목: ${total}개  |  현재 학점: ${totalCredits}  |  선택된 전공: ${majorCount}  |  선택된 교양: ${genCount}`;
+  }
+
+  function renderCourseList(containerId, items, actionLabel){
+    const el = document.getElementById(containerId);
+    if(!items.length){
+      el.innerHTML = `<div class="item"><div><b>검색 결과가 없습니다</b><p>다른 키워드로 검색해봐.</p></div></div>`;
+      return;
+    }
+    el.innerHTML = items.slice(0,600).map((c, idx)=>{
+      const bg = colorForCourse(c);
+      const room = parseRoom(c.time);
+      const type = c.type || c.category || "";
+      const credit = parseCreditToNumber(c);
+      return `
+        <div class="item">
+          <div style="min-width:0">
+            <div class="meta"><span class="tag" style="background:${bg}">${esc(c.subject)}</span></div>
+            <p>${esc(c.time||"")} · ${esc(c.professor||"")}${room ? " · "+esc(room) : ""}</p>
+            <div class="meta">
+              <span class="pill">${esc(c.category||"")}</span>
+              ${type ? `<span class="pill">${esc(type)}</span>` : ""}
+              ${credit ? `<span class="pill">${esc(credit+"학점")}</span>` : ""}
+              ${c.code ? `<span class="pill">코드 ${esc(c.code)}</span>` : ""}
+              ${c.section ? `<span class="pill">분반 ${esc(c.section)}</span>` : ""}
+            </div>
+          </div>
+          <button class="add" type="button" data-i="${idx}">${actionLabel}</button>
+        </div>
+      `;
+    }).join("");
+  }
+
+  function bindDelegation(containerId, getItemsFn, onClickCourse){
+    const el = document.getElementById(containerId);
+    if(el.dataset.bound) return;
+    el.addEventListener("click", (e)=>{
+      const btn = e.target.closest(".add");
+      if(!btn) return;
+      const i = parseInt(btn.getAttribute("data-i"), 10);
+      const items = getItemsFn();
+      const c = items[i];
+      if(c) onClickCourse(c);
+    });
+    el.dataset.bound = "1";
+  }
+
+  function addToMain(course){
+    const k = courseKey(course);
+    if(state.mainSelected.some(x => courseKey(x) === k)) return;
+
+    const conflicts = getConflicts(state.mainSelected, course);
+    if(conflicts.length){ showNotice("conflictBox", conflictHtml(conflicts)); return; }
+
+    showNotice("conflictBox", "");
+    state.mainSelected.push(course);
+    renderTimetable("timetable", state.mainSelected);
+    updateMainSummary();
+  }
+
+  function applyMainFilter(q){
+    const t = (q||"").trim().toLowerCase();
+    state.mainFiltered = t ? state.courses.filter(c => (c.searchText||"").includes(t)) : state.courses;
+    renderCourseList("courseListMain", state.mainFiltered, "추가");
+    document.getElementById("courseListMain").scrollTop = 0;
+  }
+
+  /* ===== page3 (kept, credits now correct because parseCredit fixed) ===== */
+  function sumCredits(list){ return list.reduce((s,c)=> s + parseCreditToNumber(c), 0); }
+
+  function renderMiniSelected(containerId, list, removeFn){
+    const el = document.getElementById(containerId);
+    if(!list.length){
+      el.innerHTML = `<div class="mini-item"><div><b>아직 없음</b><span>강의 목록에서 추가해봐.</span></div></div>`;
+      return;
+    }
+    el.innerHTML = list.map((c, idx)=>{
+      const cr = parseCreditToNumber(c);
+      const room = parseRoom(c.time);
+      return `
+        <div class="mini-item">
+          <div style="min-width:0">
+            <b>${esc(c.subject)}</b>
+            <span>${esc(c.time||"")} · ${esc(c.professor||"")}${room ? " · "+esc(room) : ""} ${cr ? "· "+esc(cr+"학점") : ""}</span>
+          </div>
+          <button class="xbtn" type="button" data-i="${idx}">삭제</button>
+        </div>
+      `;
+    }).join("");
+
+    if(!el.dataset.bound){
+      el.addEventListener("click", (e)=>{
+        const btn = e.target.closest(".xbtn");
+        if(!btn) return;
+        removeFn(parseInt(btn.getAttribute("data-i"),10));
+      });
+      el.dataset.bound = "1";
+    }
+  }
+
+  function updateCaseSummaries(){
+    document.getElementById("selectedInfoReq").textContent =
+      `필수 등록: ${state.required.length}개 | 필수 학점 합: ${sumCredits(state.required)}`;
+    document.getElementById("selectedInfoCand").textContent =
+      `후보 등록: ${state.candidates.length}개 | 후보 학점 합: ${sumCredits(state.candidates)}`;
+
+    renderMiniSelected("requiredList", state.required, (i)=>{
+      state.required.splice(i,1);
+      state.cases = []; state.activeCaseIndex=-1;
+      renderCasesList();
+      updateCaseSummaries();
+    });
+
+    renderMiniSelected("candidateList", state.candidates, (i)=>{
+      state.candidates.splice(i,1);
+      state.cases = []; state.activeCaseIndex=-1;
+      renderCasesList();
+      updateCaseSummaries();
+    });
+  }
+
+  function addToRequired(course){
+    const k = courseKey(course);
+    if(state.required.some(x => courseKey(x) === k)) return;
+    const conflicts = getConflicts(state.required, course);
+    if(conflicts.length){ showNotice("caseNotice", `<b>⚠️ 필수과목끼리 시간이 겹쳐 등록할 수 없습니다</b><br>${conflictHtml(conflicts)}`); return; }
+    showNotice("caseNotice", "");
+    state.required.push(course);
+    state.cases = []; state.activeCaseIndex=-1;
+    updateCaseSummaries(); renderCasesList();
+  }
+
+  function addToCandidates(course){
+    const k = courseKey(course);
+    if(state.candidates.some(x => courseKey(x) === k)) return;
+    const conflicts = getConflicts(state.required, course);
+    if(conflicts.length){
+      showNotice("caseNotice", `<b>ℹ️ 참고: 이 후보과목은 필수과목과 시간이 겹쳐 어떤 경우의 수에도 포함될 수 없습니다</b><br>${conflictHtml(conflicts)}`);
+    }
+    state.candidates.push(course);
+    state.cases = []; state.activeCaseIndex=-1;
+    updateCaseSummaries(); renderCasesList();
+  }
+
+  function applyReqFilter(q){
+    const t = (q||"").trim().toLowerCase();
+    state.reqFiltered = t ? state.courses.filter(c => (c.searchText||"").includes(t)) : state.courses;
+    renderCourseList("courseListReq", state.reqFiltered, "필수 추가");
+    document.getElementById("courseListReq").scrollTop = 0;
+  }
+  function applyCandFilter(q){
+    const t = (q||"").trim().toLowerCase();
+    state.candFiltered = t ? state.courses.filter(c => (c.searchText||"").includes(t)) : state.courses;
+    renderCourseList("courseListCand", state.candFiltered, "후보 추가");
+    document.getElementById("courseListCand").scrollTop = 0;
+  }
+
+  function generateCases(maxCredits=20, limit=40){
+    const req = state.required.slice();
+    const cand = state.candidates.slice();
+    const reqCredits = sumCredits(req);
+    if(reqCredits > maxCredits) return { error:`필수과목 학점(${reqCredits})이 한도(${maxCredits})를 초과합니다.` };
+
+    const usable = cand.filter(c => getConflicts(req, c).length === 0);
+    usable.sort((a,b)=> parseCreditToNumber(b)-parseCreditToNumber(a));
+
+    const results = [];
+    const baseOcc = buildOccupancyMap(req);
+
+    function canAdd(occ, c){
+      for(const [d,p] of parseSlots(c.time)){
+        if(occ.has(`${d}-${p}`)) return false;
+      }
+      return true;
+    }
+    function addOcc(occ, c){
+      const n = new Map(occ);
+      for(const [d,p] of parseSlots(c.time)) n.set(`${d}-${p}`, c);
+      return n;
+    }
+    function dfs(i, occ, chosen, credits){
+      results.push({ courses: req.concat(chosen), credits });
+      if(results.length >= limit*5) return;
+      if(i >= usable.length) return;
+      const c = usable[i];
+      const cr = parseCreditToNumber(c);
+      if(credits + cr <= maxCredits && canAdd(occ,c)){
+        dfs(i+1, addOcc(occ,c), chosen.concat([c]), credits+cr);
+      }
+      dfs(i+1, occ, chosen, credits);
+    }
+    dfs(0, baseOcc, [], reqCredits);
+
+    const seen = new Set();
+    const uniq = [];
+    for(const r of results){
+      const keys = r.courses.map(courseKey).sort().join("||");
+      if(seen.has(keys)) continue;
+      seen.add(keys);
+      uniq.push({ courses:r.courses, credits: sumCredits(r.courses) });
+    }
+    uniq.sort((a,b)=> (b.credits-a.credits) || (a.courses.length-b.courses.length));
+    return { cases: uniq.slice(0,limit), usableCount: usable.length, reqCredits };
+  }
+
+  function renderCasesList(){
+    const el = document.getElementById("caseList");
+    el.innerHTML = "";
+    if(!state.cases.length){
+      document.getElementById("caseMeta").textContent = "아직 생성되지 않음";
+      document.getElementById("timetableCase").innerHTML = "";
+      document.getElementById("caseDebug").textContent = "";
+      state.activeCaseIndex=-1;
+      return;
+    }
+    document.getElementById("caseMeta").textContent = `생성됨: ${state.cases.length}개 (클릭해서 시간표 보기)`;
+    state.cases.forEach((c, idx)=>{
+      const btn = document.createElement("button");
+      btn.className = "case-btn" + (idx===state.activeCaseIndex ? " active" : "");
+      btn.textContent = `경우의 수 ${idx+1} · ${c.credits}학점`;
+      btn.addEventListener("click", ()=>{
+        state.activeCaseIndex = idx;
+        Array.from(el.querySelectorAll(".case-btn")).forEach((b,i)=> b.classList.toggle("active", i===idx));
+        renderTimetable("timetableCase", c.courses);
+        document.getElementById("caseDebug").textContent =
+          `선택됨: 경우의 수 ${idx+1} (총 ${c.credits}학점, 과목 ${c.courses.length}개)`;
+      });
+      el.appendChild(btn);
+    });
+    if(state.activeCaseIndex<0){ state.activeCaseIndex=0; el.querySelector(".case-btn")?.click(); }
+  }
+
+  function loadCourses(){
+    document.getElementById("p2debug").textContent = "강의 데이터 로딩 중…";
+    google.script.run
+      .withSuccessHandler((res)=>{
+        state.courses = res.courses || [];
+        state.meta = res.meta || state.meta;
+
+        state.mainFiltered = state.courses;
+        state.reqFiltered = state.courses;
+        state.candFiltered = state.courses;
+
+        renderCourseList("courseListMain", state.mainFiltered, "추가");
+        bindDelegation("courseListMain", ()=>state.mainFiltered, addToMain);
+
+        renderCourseList("courseListReq", state.reqFiltered, "필수 추가");
+        renderCourseList("courseListCand", state.candFiltered, "후보 추가");
+        bindDelegation("courseListReq", ()=>state.reqFiltered, addToRequired);
+        bindDelegation("courseListCand", ()=>state.candFiltered, addToCandidates);
+
+        renderTimetable("timetable", state.mainSelected);
+        updateMainSummary();
+        updateCaseSummaries();
+
+        document.getElementById("p2debug").textContent = `로드 완료: ${state.courses.length}개`;
+      })
+      .withFailureHandler((err)=>{
+        alert("강의 데이터 로드 실패: " + (err && err.message ? err.message : err));
+      })
+      .apiGetCourses();
+  }
+
+  function esc(s){
+    return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;").replaceAll("'","&#039;");
+  }
+
+  (function init(){
+    document.getElementById("p1debug").textContent = "초기화 완료 ✅";
+
+    document.getElementById("btnStart").addEventListener("click", ()=>{
+      state.user.name = document.getElementById("name").value.trim();
+      state.user.grade = document.getElementById("grade").value;
+      state.user.semester = document.getElementById("semester").value;
+      state.user.major = document.getElementById("major").value.trim();
+
+      document.getElementById("metaLine").textContent = `${state.user.grade} · ${state.meta.year} ${state.user.semester}`;
+      document.getElementById("mainTitle").textContent = state.user.name ? `${state.user.name}의 시간표` : "내 시간표";
+      document.getElementById("metaLine3").textContent =
+        `${state.user.grade} · ${state.meta.year} ${state.user.semester} · ${state.user.name || ""}`.trim();
+
+      goto("page2");
+      renderTimetable("timetable", state.mainSelected);
+      updateMainSummary();
+      updateCaseSummaries();
+      loadCourses();
+    });
+
+    document.getElementById("panelMainHead").addEventListener("click", ()=>{
+      const p = document.getElementById("panelMain");
+      const hint = document.getElementById("panelMainHint");
+      p.classList.toggle("open");
+      hint.textContent = p.classList.contains("open") ? "닫기" : "열기";
+    });
+
+    document.getElementById("qMain").addEventListener("input", (e)=> applyMainFilter(e.target.value));
+    document.getElementById("btnClearMain").addEventListener("click", ()=>{
+      document.getElementById("qMain").value="";
+      applyMainFilter("");
+    });
+
+    document.getElementById("btnToCase").addEventListener("click", ()=>{
+      goto("page3");
+      showNotice("caseNotice","");
+      updateCaseSummaries();
+      renderCasesList();
+    });
+
+    document.getElementById("btnBackToMain").addEventListener("click", ()=> goto("page2"));
+
+    document.getElementById("qReq").addEventListener("input", (e)=> applyReqFilter(e.target.value));
+    document.getElementById("btnClearReq").addEventListener("click", ()=>{
+      document.getElementById("qReq").value="";
+      applyReqFilter("");
+    });
+
+    document.getElementById("qCand").addEventListener("input", (e)=> applyCandFilter(e.target.value));
+    document.getElementById("btnClearCand").addEventListener("click", ()=>{
+      document.getElementById("qCand").value="";
+      applyCandFilter("");
+    });
+
+    document.getElementById("btnGenerateCases").addEventListener("click", ()=>{
+      showNotice("caseNotice","");
+      const res = generateCases(20, 40);
+      if(res.error){
+        showNotice("caseNotice", `<b>⚠️ 생성 불가</b><br>${esc(res.error)}`);
+        state.cases=[]; state.activeCaseIndex=-1;
+        renderCasesList();
+        return;
+      }
+      state.cases = res.cases || [];
+      state.activeCaseIndex = -1;
+      document.getElementById("caseDebug").textContent =
+        `usable 후보: ${res.usableCount}개 / 필수학점: ${res.reqCredits} / 생성결과: ${state.cases.length}개`;
+      renderCasesList();
+    });
+  })();
+</script>
+</body>
+</html>
+
